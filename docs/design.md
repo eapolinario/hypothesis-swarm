@@ -1,103 +1,10 @@
-# Ideas sketch
-
-This document is a repository of sketches. Only spur-of-the-moment kind of descriptions
-
-## `agent://` URL scheme for NixOS
-
-> **⚠️ DEPRECATED — moved to implementation.**
-> This sketch is now being implemented in [https://github.com/eapolinario/sigil](https://github.com/eapolinario/sigil).
-> Kept here for historical context; do not edit further.
-
-Experiment with registering an `agent` URL scheme on NixOS. Unclear yet what
-happens when such a URL is embedded in a document and activated, but the core
-intent is: clicking/opening an `agent://` URL triggers a stateless invocation
-of `copilot` scoped to a specific project, where the project is encoded as
-part of the URL.
-
-### URL grammar (proposed)
-
-```
-agent://<project>[/<path>][?prompt=<text>&model=<id>&effort=<level>&ref=<git-ref>]
-```
-
-- `<project>` — a stable identifier, not a filesystem path. Resolved by the
-  handler to a working directory (e.g. `gh:owner/repo`, `local:ideas`,
-  `flake:github:owner/repo#dev`). Anything filesystem-shaped should be
-  rejected at the handler boundary.
-- `<path>` — optional, narrows the agent's attention to a subdirectory or
-  file within the resolved project.
-- `prompt` — the actual task. URL-encoded. May be empty (drops into an
-  interactive session instead of `-p`).
-- `model`, `effort` — map directly to `copilot --model` / `--effort`.
-- `ref` — optional git ref to check out before running.
-
-### NixOS registration mechanism
-
-Two pieces, both expressible as a NixOS module:
-
-1. A `.desktop` file with `MimeType=x-scheme-handler/agent;` installed into
-   the system profile (`environment.systemPackages` + `xdg.mime`), so
-   `xdg-open agent://...` routes to our handler. Browsers, Emacs
-   `browse-url`, and most document viewers already honor this.
-2. A handler binary (small Nix-built script — bash or a `writeShellApplication`
-   wrapping a Python parser) on `PATH`, registered as the
-   `x-scheme-handler/agent` default via `xdg.mime.defaultApplications`.
-
-### Handler behavior
-
-Stateless by design — no session resumption, no `--continue`, no shared
-context across invocations:
-
-1. Parse and validate the URL. Reject anything ambiguous.
-2. Resolve `<project>` to a working directory. For remote projects, clone
-   into a deterministic cache path (`$XDG_CACHE_HOME/agent-url/<hash>`),
-   reusing if present, refreshing if `ref` is set.
-3. Open a fresh terminal (Ghostty via Hyprland on this box) and `exec`:
-   ```
-   copilot -C <workdir> [--model <model>] [--effort <effort>] \
-           [-p <prompt> --allow-all-tools | <interactive>]
-   ```
-4. Exit when `copilot` exits. No daemon, no background state.
-
-### Open questions
-
-- **Security.** This is the load-bearing question. A clickable URL that
-  spawns an AI agent with shell access in *some* project is a phishing
-  primitive. Mitigations to explore:
-  - Mandatory confirmation dialog (`zenity`/`rofi`) showing the resolved
-    project, prompt, and model before any process starts.
-  - Allowlist of projects in `~/.config/agent-url/allowlist.toml`; unknown
-    projects require explicit one-shot approval.
-  - Never pass `--allow-all-tools` for prompts originating from untrusted
-    surfaces (browsers, mail clients). Possibly key this off the calling
-    `.desktop` entry.
-- **Document activation semantics.** What actually happens when an
-  `agent://` URL sits in a Markdown file rendered by, say, Obsidian or
-  GitHub? Most renderers will refuse to linkify unknown schemes. Need to
-  test: Emacs `org-mode`, Ghostty's OSC 8 hyperlinks, Firefox, Slack.
-- **Project resolution registry.** Where does `gh:owner/repo` map to on
-  disk? A simple convention (`~/repos/<repo>`) covers the local case;
-  remote needs a cache + lock to handle concurrent clicks.
-- **Interactive vs. non-interactive.** Empty `prompt=` → spawn terminal
-  with interactive copilot. Non-empty → run headless and surface output
-  in a notification? Or always pop a terminal?
-
-### Use cases worth sketching
-
-- Issue trackers: "Reproduce this bug" buttons that open in the right repo.
-- Internal docs: runbook steps as one-click agent invocations.
-- READMEs: "Try this locally" links that resolve to `local:<repo>` after
-  the user has cloned.
-- Cross-machine handoff: copy an `agent://` URL into chat, recipient opens
-  it on their own box with their own credentials.
-
-## Property-based testing framework with Swarm Testing
+# hypothesis-swarm design
 
 A property-based testing framework (à la QuickCheck/Hypothesis/proptest)
 whose generator strategy implements **Swarm Testing** (Groce et al., ISSTA
 2012) as a first-class feature, not a bolt-on.
 
-### The core observation
+## The core observation
 
 Classical random testing draws every "feature" (API call, token, opcode,
 constructor) from the *same* distribution on every test. Swarm testing
@@ -117,7 +24,7 @@ Most mainstream PBT libraries don't expose this. You can hack it by hand
   feature, or do, and report it),
 - reporting which feature subset triggered a failure.
 
-### What the framework would provide
+## What the framework would provide
 
 1. **Feature-tagged generators.** A `swarm(...)` strategy combinator for
    stateless generators, and a `SwarmStateMachine` base class where each
@@ -137,7 +44,7 @@ Most mainstream PBT libraries don't expose this. You can hack it by hand
    were enabled) alongside the minimised counterexample. This is the
    actionable artifact — "this bug requires push+peek but no pop".
 
-### Target ecosystem — decision: **Hypothesis (Python), shipped as `hypothesis-swarm`**
+## Target ecosystem — decision: **Hypothesis (Python), shipped as `hypothesis-swarm`**
 
 Locked in. Reasoning below; the other two stay on the page as honest
 comparisons, not as live options.
@@ -205,12 +112,12 @@ trap.
   want the proptest version. Acceptable — v1 audience is Python-library
   authors testing Python state machines, where Python speed is fine.
 
-### Shrinker design — decision: **two-phase shrink (pin, then drift), with the swarm signature stored out-of-band**
+## Shrinker design — decision: **two-phase shrink (pin, then drift), with the swarm signature stored out-of-band**
 
 This is the load-bearing technical question. The answer determines both
 the implementation strategy and the failure-report UX.
 
-#### Background: how Hypothesis shrinks
+### Background: how Hypothesis shrinks
 
 Hypothesis's shrinker operates on the *choice sequence* — the linear log
 of every random decision the strategy made (which branch of a `one_of`,
@@ -225,7 +132,7 @@ The critical property: when a shrunk choice sequence is replayed, the
 earlier decision changes, downstream `draw()`s may consume different
 bytes and produce different values — the test case morphs as a whole.
 
-#### The two modes
+### The two modes
 
 **Pin-the-swarm-signature.** During shrinking, freeze the swarm subset
 selection. The shrinker only reduces the rule firings, their arguments,
@@ -246,7 +153,7 @@ Neither subsumes the other. Pinned answers "what is this swarm bug?".
 Drift answers "what is the smallest repro, and was swarm even
 load-bearing?". A user investigating a failure wants both.
 
-#### Decision: do both, in sequence, and diff the result
+### Decision: do both, in sequence, and diff the result
 
 1. **Phase A — pinned shrink.** Run Hypothesis's full shrinker passes
    with the swarm signature held constant. Produce the within-swarm
@@ -267,7 +174,7 @@ The verdict line is the actually-useful thing. It tells the user
 whether to file the bug as "crashes when feature X is absent" or just
 "crashes, here is a trace".
 
-#### Implementation: store the swarm signature *out of band*
+### Implementation: store the swarm signature *out of band*
 
 The naive approach — draw the swarm signature as the first N bits of
 the choice sequence — makes pinning hard. Hypothesis's shrinker doesn't
@@ -303,13 +210,13 @@ Consequences:
   case. For typical state machines (~10 rules), negligible. Gated by a
   `swarm_drift=True/False` setting; default on.
 
-#### Stateless generators (`swarm(...)` combinator)
+### Stateless generators (`swarm(...)` combinator)
 
 Same pattern: the strategy holds the signature as a closure-local
 variable sampled once per test case from a side RNG, not from
 `draw()`. Phase A / Phase B logic is identical.
 
-#### What this rules out
+### What this rules out
 
 - **No semantic-aware shrinker passes.** We do not attempt to teach
   Hypothesis's shrinker about swarm structure. All the cleverness lives
@@ -320,14 +227,14 @@ variable sampled once per test case from a side RNG, not from
   or fully free (Phase B). "Pin half the features" is not supported and
   there's no clear use case.
 
-### User-facing API — decision: **base-class for stateful, `swarm()` combinator for stateless, zero new annotations in the default case**
+## User-facing API — decision: **base-class for stateful, `swarm()` combinator for stateless, zero new annotations in the default case**
 
 The headline goal: an existing `RuleBasedStateMachine` user adopts swarm
 by changing *one import and one base class*. No per-rule annotations, no
 config file, no test-runner changes. Everything else is a knob with a
 sensible default.
 
-#### Stateful: `SwarmStateMachine`
+### Stateful: `SwarmStateMachine`
 
 The canonical pedagogical case — a bounded stack with a swarm-discoverable
 bug (overflow only triggers when `clear` is never called):
@@ -374,7 +281,7 @@ swarm hits it almost immediately on any case where `clear` is disabled
 and `push` is enabled. The pinned shrink reports: "features `{push,
 not pop}`" (or similar) — the absence is the load-bearing signal.
 
-#### Per-rule controls (when defaults aren't enough)
+### Per-rule controls (when defaults aren't enough)
 
 ```python
 class FileSystem(SwarmStateMachine):
@@ -416,7 +323,7 @@ class FileSystem(SwarmStateMachine):
     ...
 ```
 
-#### Stateless: `swarm()` combinator
+### Stateless: `swarm()` combinator
 
 For grammar-based generators, token streams, or any
 `one_of`-shaped strategy where the *alphabet* should vary per case:
@@ -445,7 +352,7 @@ mechanism as the stateful case) and draws via `one_of` restricted to
 that subset. Recursive references via `st.deferred` work because the
 active subset is fixed for the whole test case.
 
-#### Failure report format
+### Failure report format
 
 A pytest plugin (auto-registered on install) intercepts Hypothesis
 failures from swarm-aware tests and appends a footer:
@@ -471,7 +378,7 @@ Three verdict shapes, as decided in the shrinker section:
 - "bug exists under uniform random; swarm just found it faster" (drift
   signature is all features)
 
-#### Reproducers
+### Reproducers
 
 Hypothesis's `@reproduce_failure(version, blob)` is wrapped:
 
@@ -492,7 +399,7 @@ and the swarm signature (which would otherwise be re-sampled from the
 side RNG). Side-cars in Hypothesis's example database under a related
 key, so `--hypothesis-seed` reproducibility is preserved.
 
-#### What's deliberately *not* in the API
+### What's deliberately *not* in the API
 
 - **No `@swarm_rules` class decorator.** Base-class only. Decorators
   that need to override `__init__` get messy; the base class is the
@@ -506,12 +413,12 @@ key, so `--hypothesis-seed` reproducibility is preserved.
 - **No `swarm=True` flag on `@given`.** The `swarm()` combinator is the
   single way to opt a stateless generator in. One way to do it.
 
-### Empirical validation — decision: **three-tier benchmark suite, pre-registered, against three different skeptics**
+## Empirical validation — decision: **three-tier benchmark suite, pre-registered, against three different skeptics**
 
 The one experiment that kills the project (if results come back flat) is
 Tier 2 below. Build it first; the rest is supporting evidence.
 
-#### Three skeptics, three experiments
+### Three skeptics, three experiments
 
 Different audiences are convinced by different numbers. Address each
 explicitly rather than producing one mushy benchmark that satisfies
@@ -525,7 +432,7 @@ nobody.
 3. **The Hypothesis maintainer.** "Why isn't your win just better
    `target()` tuning, or smarter `Phase.generate`?"
 
-#### Tier 1 — pedagogical / instrumentation check (smoke tests)
+### Tier 1 — pedagogical / instrumentation check (smoke tests)
 
 Known-buggy toys where swarm *must* win or the implementation is
 broken. Verifies the measurement infrastructure, not the technique.
@@ -541,7 +448,7 @@ Success criterion: swarm finds the bug in <10% of the trials stock
 Hypothesis needs. If this doesn't hold, stop — the bug isn't in the
 benchmark, it's in our code.
 
-#### Tier 2 — historical replication (the load-bearing experiment)
+### Tier 2 — historical replication (the load-bearing experiment)
 
 Mine real Python projects for *historical bugs* found by Hypothesis
 stateful testing. Check out the pre-fix commit, package the
@@ -580,7 +487,7 @@ Kill criterion: if swarm doesn't reduce median TTFF by ≥2× on a
 majority of Tier-2 bugs, the project's value proposition is wrong and
 should be reconsidered. **This experiment runs first.**
 
-#### Tier 3 — fresh bug-finding (the show-me-the-bodies experiment)
+### Tier 3 — fresh bug-finding (the show-me-the-bodies experiment)
 
 Run `hypothesis-swarm` against current releases of the Tier 2 projects
 with a fixed budget (say, 24 CPU-hours per project) and report any
@@ -589,7 +496,7 @@ nothing, might find a CVE. Either way the *attempt* is part of the
 writeup; finding zero new bugs in mature libraries is itself a useful
 result.
 
-#### Comparison conditions (mandatory in every experiment)
+### Comparison conditions (mandatory in every experiment)
 
 - **`stock`** — vanilla Hypothesis, default settings.
 - **`stock+target`** — vanilla Hypothesis with `target()` calls on a
@@ -602,7 +509,7 @@ result.
   to `stock` within noise. Catches measurement bugs where our
   infrastructure favours one branch.
 
-#### Metrics
+### Metrics
 
 1. **Time-to-first-failure (TTFF).** Median + p95 + success-rate within
    budget. Mann–Whitney U for significance; bootstrap CIs.
@@ -617,7 +524,7 @@ result.
    a strictly smaller repro than Phase A. If this is near zero, drift
    isn't pulling its weight and should be reconsidered.
 
-#### Statistical and reproducibility hygiene
+### Statistical and reproducibility hygiene
 
 - **Pre-register hypotheses.** Before measuring: "we expect ≥5× TTFF
   reduction on Tier 1, ≥2× median on Tier 2, no significant difference
@@ -632,7 +539,7 @@ result.
   matplotlib plots committed alongside the code. Skeptics must be able
   to reproduce the headline number in one command.
 
-#### Deliverables
+### Deliverables
 
 - The bench repo above, as the durable artifact.
 - A README with the headline plot (TTFF distributions per condition,
@@ -642,7 +549,7 @@ result.
   framed as "swarm testing at the framework level" — the academic
   skeptic's currency.
 
-#### Known risks
+### Known risks
 
 - **`stock+target` eats our lunch.** Possible, especially on Tier 2 bugs
   where the bug is detectable via an observable. If true, the project's
@@ -658,7 +565,7 @@ result.
   emit "essential" if uniform-random retries under a substantial budget
   failed to reproduce).
 
-### Naming — decision: **keep "swarm", package as `hypothesis-swarm`, lead the README with the mechanism**
+## Naming — decision: **keep "swarm", package as `hypothesis-swarm`, lead the README with the mechanism**
 
 Two small calls, neither worth more thought:
 
@@ -677,7 +584,7 @@ disambiguates. The cost of renaming — forfeiting 13 years of citation
 chain and looking like a credit grab for a known technique — exceeds
 the benefit of a more self-descriptive name.
 
-### Why bother
+## Why bother
 
 Swarm testing is a 13-year-old technique with strong empirical backing
 that essentially no mainstream PBT library implements as a first-class
